@@ -22,11 +22,17 @@ library('tidyr')
 library('dplyr')
 library('tidyverse')
 library('purrr')
-library('reshape2')
+library('reshape2') 
+library('plotly') # 3D plotting
+library("kernlab") # kernel-based machine learning techniques 
+library("factoextra") # multivariable analysis in R [hkmean]
+#library("dendextend") # create dendrogram object for hclustering plot 
 
 # -----------------------------------------------------------------------------------------------------
-# reset all files and created variables
-rm(list = ls())
+# intial set up
+ls() # list all objects 
+gc() # force R to release memory of deleted variables 
+rm(list = ls()) # delete all variables in the environment
 # -----------------------------------------------------------------------------------------------------
 
 
@@ -103,6 +109,8 @@ Strip_Data = function(x, sep,  gen1, gen2){
   return(oneAvg)
 }
 
+
+
 gt_kni_bin = map(gt_kni_raw, Strip_Data, sep = 1, gen1 = "gt", gen2 = "kni")
 kr_hb_bin = map(kr_hb_raw, Strip_Data, sep = 1, gen1 = "kr", gen2 = "hb")
 
@@ -163,7 +171,7 @@ ggplot(droso_Boolean_long, aes(x= AP, y = Boolean, color = gene)) +
 #   calculate the transitional probabilitie between each different state
 # Notice: Markov-like behaviro: only the previous timeframe can affects the next one
 # -----------------------------------------------------------------------------------------------------
-
+gene = c("gt", "kr", "kni", "hb")
 state_name = c('0 0 0 0', '1 0 0 0', '0 1 0 0', '0 0 1 0', '0 0 0 1',
                '1 1 0 0', '1 0 1 0', '1 0 0 1', '0 1 1 0', '0 1 0 1',
                '0 0 1 1', '1 1 1 0', '1 0 1 1', '1 1 0 1', '0 1 1 1',
@@ -176,54 +184,101 @@ TP_notation = function(x, dict = state_name) {
   return(which(x == state_name))
 }
 
-# 1. create the right dataframe for counting the transitional state
-droso_state = droso_Boolean %>%
-  mutate('gt' = as.character(gt_Boolean),
-         'kr' = as.character(kr_Boolean),
-         'kni' = as.character(kni_Boolean),
-         'hb' = as.character(hb_Boolean)) %>%
-  mutate('state' = paste(gt, kr, kni, hb)) %>%
-  select(c(1, 2, 11)) 
 
-droso_state_int = map_int(matrix(unlist(droso_state[, 3])), TP_notation) 
-droso_state_nor = data_frame('time' = droso_state[, 2], 'state' = droso_state_int)
-# make droso_state_string into a matrix format
-droso_state_mat = subset(droso_state_nor, time == '1')
-for (t in 2:8){
-  droso_state_mat = cbind(droso_state_mat, subset(droso_state_nor, time == t))
-}
-droso_state_mat = droso_state_mat[, c(2,4,6,8,10,12,14,16)]
-row.names(droso_state_mat) = 4:98 # row = AP position
-colnames(droso_state_mat) = 1:8 # col = timeframe
-
-# 2. count the number of the transition
-trans_counter_mat = matrix(0, 16, 16) # row = initial_state, col = trans_state
-for (x in 1:dim(droso_state_mat)[1]){
-  for (t in 1:7){
-    initial_state = droso_state_mat[x,t]
-    trans_state = droso_state_mat[x, t+1]
-    trans_counter_mat[initial_state, trans_state] = trans_counter_mat[initial_state, trans_state] + 1
+Spacial_Trans_Prob = function(df, begin, end){
+  # counter all the states and calculate the transitional probabilities of the given Boolean state of 
+  #   gap genes in selected AP position segments. 
+  #       input: df = droso_Boolean (Boolean value of each indiviual gap gene); 
+  #              begin = AP starting point; end = AP ending point;
+  #       output: a list of matrices: [[1]] = overall state matrix ; [[2]] = trans_prob matrix ;
+  #                                   [[3]] = trans_prob_counter matrix
+  
+  #1. create the right dataframe for counting the transitional state
+  df_state = filter(df, (AP >= begin & AP <= end))%>%
+    mutate('gt' = as.character(gt_Boolean),
+           'kr' = as.character(kr_Boolean),
+           'kni' = as.character(kni_Boolean),
+           'hb' = as.character(hb_Boolean)) %>%
+    mutate('state' = paste(gt, kr, kni, hb)) %>%
+    select(c("AP", "time", "state")) 
+  
+  df_state_int = data_frame("state" = map_int(matrix(unlist(df_state[["state"]])), TP_notation)) %>%
+    mutate("time" = df_state[["time"]])
+  
+  # make droso_state_string into a matrix format
+  df_state_mat = subset(df_state_int, time == 1)
+  for (t in 2:8){
+    df_state_mat = cbind(df_state_mat, subset(df_state_int, time == t))
   }
+  df_state_mat = df_state_mat[, c(1,3,5,7,9,11,13,15)] # filter out the state variables only
+  row.names(df_state_mat) = begin:end # row = AP position
+  colnames(df_state_mat) = 1:8 # col = timeframe
+  
+  # 2. count the number of the transition
+  trans_counter_mat = matrix(0, 16, 16) # row = initial_state, col = trans_state
+  for (x in 1:dim(df_state_mat)[1]){
+    for (t in 1:7){
+      initial_state = df_state_mat[x,t]
+      trans_state = df_state_mat[x, t+1]
+      trans_counter_mat[initial_state, trans_state] = trans_counter_mat[initial_state, trans_state] + 1
+    }
+  }
+  
+  # 3. convert the results into probabilities
+  trans_prob_list = list()
+  for (i in 1:16){
+    trans_prob_temp = map(trans_counter_mat[i, ], function(x){x/sum(trans_counter_mat[i, ])})
+    trans_prob_list= append(trans_prob_list, trans_prob_temp)
+  }
+  trans_prob_mat = matrix(unlist(trans_prob_list), nrow = 16) # row = transitional state, col = initial state
+  trans_prob_mat[is.na(trans_prob_mat)] = 0 # replace NA with 0 entries
+  
+  return(list(df_state_mat, trans_prob_mat, trans_counter_mat))
 }
 
-# 3. convert the results into probabilities
-trans_prob_list = list()
-for (i in 1:16){
-  trans_prob_temp = map(trans_counter_mat[i, ], function(x){x/sum(trans_counter_mat[i, ])})
-  trans_prob_list= append(trans_prob_list, trans_prob_temp)
-}
-trans_prob_mat = matrix(unlist(trans_prob_list), nrow = 16) # row = transitional state, col = initial state
-trans_prob_mat[is.na(trans_prob_mat)] = 0 
+# kernel k-mean clustered result
+cluster1_1_trans_state = Spacial_Trans_Prob(droso_Boolean, 4, 23)[[1]]
+cluster2_1_trans_state = Spacial_Trans_Prob(droso_Boolean, 24, 39)[[1]]
+cluster1_2_trans_state = Spacial_Trans_Prob(droso_Boolean, 40, 46)[[1]]
+cluster2_2_trans_state = Spacial_Trans_Prob(droso_Boolean, 47, 69)[[1]]
+cluster3_trans_state = Spacial_Trans_Prob(droso_Boolean, 70, 98)[[1]]
 
-# 4. visulizating the reulst
-tp_long = melt(trans_prob_mat)
+cluster1_1_tp = Spacial_Trans_Prob(droso_Boolean, 4, 23)[[2]]
+cluster2_1_tp = Spacial_Trans_Prob(droso_Boolean, 24, 39)[[2]]
+cluster1_2_tp = Spacial_Trans_Prob(droso_Boolean, 40, 46)[[2]]
+cluster2_2_tp = Spacial_Trans_Prob(droso_Boolean, 47, 69)[[2]]
+cluster3_tp = Spacial_Trans_Prob(droso_Boolean, 70, 98)[[2]]
+
+cluster1_1_tp_counter = Spacial_Trans_Prob(droso_Boolean, 4, 23)[[3]]
+cluster2_1_tp_counter = Spacial_Trans_Prob(droso_Boolean, 24, 39)[[3]]
+cluster1_2_tp_counter = Spacial_Trans_Prob(droso_Boolean, 40, 46)[[3]]
+cluster2_2_tp_counter = Spacial_Trans_Prob(droso_Boolean, 47, 69)[[3]]
+cluster3_tp_counter = Spacial_Trans_Prob(droso_Boolean, 70, 98)[[3]]
+
+
+
+full_trans_state = Spacial_Trans_Prob(droso_Boolean, 4,98)[[1]]
+full_tp = Spacial_Trans_Prob(droso_Boolean, 4, 98)[[2]]
+full_tp_counter = Spacial_Trans_Prob(droso_Boolean, 4, 98)[[3]]
+
+# visulizating the reulst
+tp_long = melt(cluster3_tp)
+
+ggplot(tp_long, aes(x = Var1, y = value)) +
+  geom_col() +
+  facet_wrap(~Var2) +
+  ylab('total count') +
+  xlab("Transitonal States") +
+  ggtitle('Full Range Transitional Probabilities Histogram') +
+  theme(text = element_text(size = 20))
+
 ggplot(tp_long, aes(x = Var2, y = Var1)) +
   geom_raster(aes(fill = value)) +
   scale_fill_gradient(low="grey90", high="red") +
   xlab('Initial States') +
   ylab("Transitonal States") +
-  ggtitle('Transitional Probabilities Matrix') +
-  theme(text = element_text(size = 15))
+  ggtitle('Cluster 3 Transitional Probabilities Matrix') +
+  theme(text = element_text(size = 20))
 
 ggplot(tp_long, aes(x = Var1, y = value)) +
   geom_col() +
@@ -231,8 +286,8 @@ ggplot(tp_long, aes(x = Var1, y = value)) +
   facet_wrap(~Var2) +
   ylab('Transitional Probabilities') +
   xlab("Transitonal States") +
-  ggtitle('Transitional Probabilities Barplot') +
-  theme(text = element_text(size = 15))
+  ggtitle('Cluster 3 Transitional Probabilities Barplot') +
+  theme(text = element_text(size = 20))
 
 #########################################################################################
 # III.  Simulation:
@@ -240,21 +295,22 @@ ggplot(tp_long, aes(x = Var1, y = value)) +
 # -----------------------------------------------------------------------------------------------------
 # Simulate the gap gene interactions with the calculated transitional probabilities
 # -----------------------------------------------------------------------------------------------------
-trans_prob = as.data.frame(trans_prob_mat) # row = transitional state; col = initial state
-trans_prob_cummulative = trans_prob_mat # cummlative version of the trans_prob for simulation purpose
-for (init in 1:16){
-  ind_zero = which(trans_prob_mat[, init] == 0) # record the index where the entry ==0
-  for (tran in 1:15){
-    trans_prob_cummulative[tran+1, init] = trans_prob_cummulative[tran, init] + trans_prob_cummulative[tran+1, init]
-  }
-  trans_prob_cummulative[ind_zero, init] = 0 # reset the original entries back to zero
-}
-
-TP_Simulation = function(s){
+TP_Calculation = function(s, tp){
   # Scan through all states and determine the next state based on the calculated transitional probabilities
-  #       input: s = each individual state
+  #       input: tp = trans_prob; s = initial state
   #       output: next_state = state after applying transitional probabilities
-  tp_one = trans_prob_cummulative[, s]
+  
+  # obtain a cummulative version of trans.prob. matrix for simulation purpose
+  trans_prob_cummulative = tp # cummlative version of the trans_prob for simulation purpose
+  for (init in 1:16){
+    ind_zero = which(tp[, init] == 0) # record the index where the entry ==0
+    for (tran in 1:15){
+      trans_prob_cummulative[tran+1, init] = trans_prob_cummulative[tran, init] + trans_prob_cummulative[tran+1, init]
+    }
+    trans_prob_cummulative[ind_zero, init] = 0 # reset the original entries back to zero
+  }
+  # now scan through each compact state of the given file 
+  tp_one = trans_prob_cummulative[,s]
   for (i in tp_one){
     rd = runif(1) # generate random number
     if (rd < i){
@@ -265,58 +321,18 @@ TP_Simulation = function(s){
   return(next_state)
 } 
 
-nn = 1000 # determine number of simulation
-
-droso_sim_n_list  = sim_label = list()
-for (n in 1:nn) {
-  droso_sim_temp = matrix(0, 95, 8)
-  droso_sim_temp[, 1] = droso_state_mat[, 1]
-  for (t in 1:7){
-    droso_sim_temp[, t+1] = map_int(droso_sim_temp[, t], TP_Simulation)
-  }
-  # renaming and reorginazing
-  row.names(droso_sim_temp) = 4:98 
-  droso_sim_temp_long = melt(droso_sim_temp)
-  # decoding the state back to (gt, kr, kni, hb):
-  droso_sim_de = data_frame('AP' = droso_sim_temp_long$Var1, 
-                            'time' = droso_sim_temp_long$Var2, 
-                            'state' = state_name[droso_sim_temp_long$value])
-  state_split = strsplit(droso_sim_de$state, split =' ')
-  gt = kr = kni = hb = list()
-  for (i in state_split){
-    gt = unlist(append(gt, as.integer(i[1])))
-    kr = unlist(append(kr, as.integer(i[2])))
-    kni = unlist(append(kni, as.integer(i[3])))
-    hb = unlist(append(hb, as.integer(i[4])))
-  }
-  droso_sim_final = data.frame(droso_sim_de) %>%
-    mutate(gt, kr, kni, hb) %>% 
-    gather(key = 'gene', value = 'Boolean', gt:hb)
-  # store each simulation into a large list
-  droso_sim_n_list[[n]] = droso_sim_final
-  # creating 'sim' vector for naming purpose
-  sim_label[[n]] = rep(n, dim(droso_sim_final)[1])
-}
-
-# now concatenate all simulations into one huge matrix/df:
-droso_sim_n = droso_sim_n_list[[1]]
-for (n in 2:nn){ #start with 2, because the 1st one is used for initiaion of the matrix, 'droso_sim_n'
-  droso_sim_n = rbind(droso_sim_n, droso_sim_n_list[[n]])
-}
-droso_sim_n = mutate(droso_sim_n, 'sim' = unlist(sim_label))
-
-# Averaging all the simulation results into probabilities to eliminate the randomness
-
-Avg_Simulation = function(ge, df, n){
+Avg_Simulation = function(ge, df, n, begin, end){
   # average over all time and AP position for specific gene, created for map function mainly
   # input: ge = specific gene(string)
   #        df = dataframe/matrix of simluation results
   #        n = number of simulation
+  #        begin = beginning of the AP-position's index
+  #        ened = end of the AP-position;s index. 
   # output: gene_avg_t = averaged results through all time and AP position(list)
   
   gene_avg_x = gene_avg_t = list()
   for (t in 1:8){
-    for (x in 4:98){
+    for (x in begin:end){
       sim_subset = filter(df, AP == x, time ==t, gene == ge)
       gene_avg_x[[x]] = sum(sim_subset$Boolean)/n #avg at time t through all AP position
     }
@@ -325,47 +341,101 @@ Avg_Simulation = function(ge, df, n){
   return(gene_avg_t)
 }
 
-droso_avgsim_all = map(c('gt', 'kr', 'kni', 'hb'), Avg_Simulation, df = droso_sim_n, n = nn)
-droso_avgsim = data.frame('AP' = droso_Boolean$AP, 'time' = droso_Boolean$time) %>%
-  mutate('gt_avg' = unlist(droso_avgsim_all[[1]]),
-         'kr_avg' = unlist(droso_avgsim_all[[2]]),
-         'kni_avg' = unlist(droso_avgsim_all[[3]]), 
-         'hb_avg' = unlist(droso_avgsim_all[[4]])
-  ) 
+nn = 100 # determine number of simulation
 
-droso_avgsim_long = gather(droso_avgsim, key = 'gene', value = 'avg_prob', gt_avg:hb_avg)
+Spacial_Sim= function(df, tp, nn, begin, end){
+  
+  # perform trans_probability simulation for any given n simulation and AP positions;
+  #   then average through n simulation to smooth out all of the randomness.
+  # inputs:   df = droso_state_mat; tp = trans_prob
+  #           nn = # of simulations; begin starting AP position; end = ending AP position
+  # ouputs:   df_sim_n = a huge matrix/df that contains all the simulation results in genes Boolean
+  
+  df_n_list  = sim_label = list()
+  for (n in 1:nn) {
+    df_temp = matrix(0, (end - begin+1), 8) # length(end-begin+1) = length(begin:end)
+    df_temp[, 1] = df[, 1]
+    for (t in 1:7){
+      df_temp[, t+1] = map_int(df_temp[, t], tp = tp, TP_Calculation)
+    }
+    # renaming and reorginazing
+    row.names(df_temp) = begin:end
+    df_temp_long = melt(df_temp)
+    # decoding the state back to (gt, kr, kni, hb):
+    df_de = data_frame('AP' = df_temp_long$Var1, 
+                       'time' = df_temp_long$Var2, 
+                       'state' = state_name[df_temp_long$value])
+    state_split = strsplit(df_de$state, split =' ')
+    gt = kr = kni = hb = list()
+    for (i in state_split){
+      gt = unlist(append(gt, as.integer(i[1])))
+      kr = unlist(append(kr, as.integer(i[2])))
+      kni = unlist(append(kni, as.integer(i[3])))
+      hb = unlist(append(hb, as.integer(i[4])))
+    }
+    df_final = data.frame(df_de) %>%
+      mutate(gt, kr, kni, hb) %>% 
+      gather(key = 'gene', value = 'Boolean', gt:hb)
+    # store each simulation into a large list
+    df_n_list[[n]] = df_final
+    # creating 'sim' vector for naming purpose
+    sim_label[[n]] = rep(n, dim(df_final)[1])
+  }
+  
+  # now concatenate all simulations into one huge matrix/df:
+  df_sim_n = df_n_list[[1]]
+  for (n in 2:nn){ #start with 2, because the 1st one is used for initiaion of the matrix, 'droso_sim_n'
+    df_sim_n = rbind(df_sim_n, df_n_list[[n]])
+  }
+  df_sim_n = mutate(df_sim_n, 'sim' = unlist(sim_label))
+  
+  df_avgsim_all = map(gene, Avg_Simulation, df = df_sim_n, n = nn, begin, end)
+  
+  # create a time label for data merging during averaging process
+  t_label = c()
+  for (t in 1:8){
+    t_label = c(t_label, rep(t, (end - begin + 1)))
+  }
+  
+  df_avgsim = data.frame('AP' = rep(begin:end, 8), 'time' = t_label) %>%
+    mutate('gt_avg' = unlist(df_avgsim_all[[1]]),
+           'kr_avg' = unlist(df_avgsim_all[[2]]),
+           'kni_avg' = unlist(df_avgsim_all[[3]]),
+           'hb_avg' = unlist(df_avgsim_all[[4]]) )
+  return(df_avgsim)
+}
 
+droso_sim_100 = Spacial_Sim(full_trans_state,tp = full_tp, nn, 4, 98)
+
+c1_1_sim = Spacial_Sim(cluster1_1_trans_state, tp = cluster1_1_tp, nn, 4, 23)
+c2_1_sim = Spacial_Sim(cluster2_1_trans_state, tp = cluster2_1_tp, nn, 24, 39)
+c1_2_sim = Spacial_Sim(cluster1_2_trans_state, tp = cluster1_2_tp, nn, 40, 46)
+c2_2_sim = Spacial_Sim(cluster2_2_trans_state, tp = cluster2_2_tp, nn, 47, 69)
+c3_sim = Spacial_Sim(cluster3_trans_state, tp = cluster3_tp, nn, 70, 98)
+
+# stich all the clusters results into one complete one
+all_cluster = data.frame(rbind(filter(c1_1_sim, time == 1), filter(c2_1_sim, time == 1),
+                         filter(c1_2_sim, time == 1),filter(c2_2_sim, time == 1), filter(c3_sim, time == 1)))
+for (t in 2:8){
+  all_cluster = rbind(all_cluster,(rbind(filter(c1_1_sim, time == t), filter(c2_1_sim, time == t),
+                      filter(c1_2_sim, time == t),filter(c2_2_sim, time == t), filter(c3_sim, time == t))))
+}
+colnames(all_cluster) = c("AP", 'time', 'gt_avg_cl', 'kr_avg_cl', 'kni_avg_cl', 'hb_avg_cl') # relabeling
 
 # visulization the simulation results:
-ggplot(droso_avgsim_long, aes(x = AP, y = avg_prob)) +
+sim_long = gather(all_cluster, key = 'gene', value = 'avg_prob', gt_avg_cl:hb_avg_cl)
+
+ggplot(sim_long, aes(x = AP, y = avg_prob)) +
   geom_line() +
   facet_grid(time ~ gene) +
   ylab('Avg Probabilities') +
   xlab("AP position") +
-  ggtitle('Simulation Results for n = 1000') +
-  theme(text = element_text(size = 15))
-                                              
-# compare simulation and experimental Boolean results:
-source = c(rep('sim', 3040), rep('WT', 3040))
-gene_label = rep(c(rep('gt', 760), rep('kr', 760), rep('kni', 760), rep('hb', 760)), 2)
-droso_compare = droso_avgsim %>%
-  cbind(droso_Boolean[, c(5, 4, 6, 3)]) %>%
-  gather(key = 'gene', value = 'value', gt_avg:hb_Boolean) %>%
-  mutate('source' = source, 'gene_label' = gene_label)
-  
-droso_compare_gt = droso_compare[, c(1,2,3,9)] %>%
-  gather(key = 'type', value = 'value', gt_avg:gt_Boolean)
-  
-ggplot(droso_compare, aes(x = AP, y = value)) +
-  geom_line(alpha = 0.8, aes(linetype = source)) + 
-  facet_grid(gene_label~time) +
-  xlab("AP position") +
-  ylab("Probability") + 
-  ggtitle("Simulation vs Experimental") + 
-  theme(text = element_text(size = 15))
+  ggtitle('3rd Clustering Simulation Results for n = 100') +
+  theme(text = element_text(size = 20))
+
+#-------------------------------------------------------##########
 
 # calculate the WT probabilities: intensity >> Boolean >> probabilities >> bin to 100
-
 Probability_Conversion = function(x, sep,  gene1, gene2){
   # Convert the raw intensity measurements of the gap genes into 
   #     probabilities by counting the Boolean value then average over a strip:
@@ -389,31 +459,38 @@ gt_kni_prob = map(gt_kni_raw, Probability_Conversion, sep = 1, gene1 = 'gt', gen
 kr_hb_prob = map(kr_hb_raw, Probability_Conversion, sep = 1, gene1 = 'kr', gene2 = 'hb')
 
 # finally assemble the prob data into one complete dataframe
-droso_gap_prob = data.frame()
+WT_prob = data.frame()
 for (i in 1:8){
   prob_temp = cbind('AP' = 4:98, # only consider data in this range because of 'NAN'
                    gt_kni_prob[[i]][4:98, ], kr_hb_prob[[i]][4:98, ], 
                    'time' = rep(i, dim(gt_kni_prob[[i]][4:98, ])[1]))
-  droso_gap_prob = rbind(droso_gap_prob, prob_temp)
+  WT_prob = rbind(WT_prob, prob_temp)
 }
 
-# compare simulation and experimental Prob. results:
-source = c(rep('sim', 3040), rep('WT', 3040))
-gene_label = rep(c(rep('gt', 760), rep('kr', 760), rep('kni', 760), rep('hb', 760)), 2)
-droso_compare_prob = droso_avgsim %>%
-  cbind(droso_gap_prob[, c(2, 4, 3, 5)]) %>%
+# Combines normal(whole space sim), clustering sim, and WT results into one complete df for visilization
+source = c(rep('sim', 3040),rep('cl_sim', 3040),rep('WT', 3040))
+gene_label = rep(c(rep('gt', 760), rep('kr', 760), rep('kni', 760), rep('hb', 760)), 3)
+droso_compare_prob = droso_sim_100 %>%
+  cbind(all_cluster[, c('gt_avg_cl', 'kr_avg_cl', 'kni_avg_cl', 'hb_avg_cl')]) %>%
+  cbind(WT_prob[, c('gt', 'kr', 'kni', 'hb')]) %>%
   gather(key = 'gene', value = 'value', gt_avg:hb) %>%
   mutate('source' = source, 'gene_label' = gene_label)
 
 # visulized the probabilities comparison results:
 ggplot(droso_compare_prob, aes(x = AP, y = value)) +
   geom_line(alpha = 0.8, aes(linetype = source)) + 
-  facet_grid(time~gene_label) +
+  facet_grid(time~gene_label) + 
+  scale_linetype_manual(values=c("twodash", "dotted", "solid")) +
   xlab("AP position") +
   ylab("Probability") + 
-  ggtitle("Simulation vs Experimental in Prob") + 
-  theme(text = element_text(size = 15))
+  ggtitle("Simulation vs Experimental in Prob N = 100") + 
+  theme(text = element_text(size = 20))
 
+# -----------------------------------------------------------------------------------------------------
+# simulation with diffusion D(x_i-1 + x_i + x_j+1) : diffusion >>>>> Trans. Prob. (for every timestep)
+# -----------------------------------------------------------------------------------------------------
+
+ 
 #########################################################################################
 # IV.  Spacial Decomposition :
 #########################################################################################
@@ -441,15 +518,81 @@ ggplot(droso_gap_bin, aes(x = gt, y = kr, color = AP)) +
   ggtitle("gt vs kr in time binned data set ") + 
   theme(text = element_text(size = 15))
 
-ggplot(droso_gap_bin, aes(x = kni, y = hb, color = AP)) +
-  geom_point(alpha = 0.8) +
-  facet_wrap(~time, nrow =2) +
-  ggtitle("kni vs hb in time binned data set ") + 
+# create an extra label for 'droso_gap_bin' df to create manual segmentation 
+AP_label = c("0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100")
+seg_label= c()
+for (x in seq(0, 90, 10)){
+  seg_temp = filter(droso_gap_bin, time == 1 & AP >= x & AP < x +10)
+  seg_label = c(seg_label, rep(AP_label[x/10 + 1], dim(seg_temp)[1]))
+}
+droso_gap_bin = mutate(droso_gap_bin, "manual_seg" = rep(seg_label, 8))
+
+ggplot(droso_gap_bin, aes(x = gt, y = kr)) + 
+  geom_point() + 
+  facet_grid(manual_seg ~ time) +
+  ggtitle("gt vs kr in time with manual segmentation binned data set ") + 
   theme(text = element_text(size = 15))
 
+ggplot(droso_gap_bin, aes(x = kni, y = hb)) + 
+  geom_point() + 
+  facet_grid(manual_seg ~ time) +
+  ggtitle("kni vs hb in time with manual segmentation binned data set ") + 
+  theme(text = element_text(size = 15))
 
+# -----------------------------------------------------------------------------------------------------
+# Implement Clustering Analysis Methods: k-mean , kernel k-mean(nonlinear), Hierarchical k-mean (hkmean)
+# -----------------------------------------------------------------------------------------------------
+# output "droso_gap_bin" into a csv file
+# write_csv(droso_gap_bin, path = "gap_gene_intensity")
 
-AP_label = c("0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100")
+km_df = scale(droso_gap_bin[ , c(-6, -7)]) # scale the df for clustering purpose
+# implement k-mean
+model_km3 = kmeans(km_df, centers =3)
+droso_km3 = mutate(droso_gap_bin, "cluster" = model_km3$cluster)
+                          
+# --------------------------------------
+# implement kernel k-mean
+model_kkm3 = kkmeans(as.matrix(km_df), centers = 3) # kkmeans only takes in matrix/list data type
+droso_kkm3 = mutate(droso_gap_bin, "cluster" = model_kkm3)
+
+# implement Hierachical k-mean: an optimized version for k-mean 
+model_hkm = hkmeans(km_df, k = 2)
+droso_hkm = mutate(droso_gap_bin, "cluster" = model_hkm$cluster)
+
+# visualize the dendrogram/tree 
+fviz_cluster(model_hkm)
+
+#3D plot for the clustered data through all time.
+km_3D <- plot_ly(droso_kkm3, x = ~AP, y = ~gt, z = ~kr,
+             marker = list(size = 2, color = ~as.factor(cluster), showscale = TRUE)) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'AP'),
+                      yaxis = list(title = 'gt intensity'),
+                      zaxis = list(title = 'kr intensity')),
+         annotations = list(
+           x = 1.15,
+           y = 1.05,
+           text = 'cluster',
+           xref = 'paper',
+           yref = 'paper',
+           showarrow = FALSE
+         ))
+
+# 2D plot of the cluster results
+ggplot(droso_hkm, aes(x = gt , y = kr, color = factor(cluster))) + 
+  geom_point(alpha =0.6) + 
+  facet_wrap(~time, nrow =2 ) + 
+  xlab("gt") +
+  ylab("kr") + 
+  ggtitle("Hierachiechal k-mean(k=3) [include AP info] gt vs kr Intensity") +
+  theme(text = element_text(size = 20))
+
+# -------------------------------
+# perform simulation with kernel kmean result at time 4 
+# -------------------------------
+kkm3_t4_c1 = filter(droso_kkm3, time == 4 & cluster == 1)
+kkm3_t4_c2 = filter(droso_kkm3, time == 4 & cluster == 2)
+kkm3_t4_c3 = filter(droso_kkm3, time == 4 & cluster == 3)
 
 
 #########################################################################################
